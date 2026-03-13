@@ -16,39 +16,109 @@ URL = (
 CSV_PATH = Path(__file__).parent / "data" / "prices.csv"
 DEBUG_DIR = Path(__file__).parent / "debug"
 
+# JS to remove headless/automation fingerprints before any page scripts run
+STEALTH_JS = """
+// Remove webdriver flag
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// Fake plugins
+Object.defineProperty(navigator, 'plugins', {
+    get: () => [1, 2, 3, 4, 5],
+});
+
+// Fake languages
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['de-DE', 'de', 'en-US', 'en'],
+});
+
+// Remove Chrome automation indicators
+if (window.chrome === undefined) {
+    window.chrome = { runtime: {} };
+}
+
+// Fake permissions query
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) =>
+    parameters.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : originalQuery(parameters);
+"""
+
 
 def fetch_page() -> str:
-    """Fetch the booking page HTML using a headless browser."""
+    """Fetch the booking page HTML using a stealth headless browser."""
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
+        context = browser.new_context(
+            locale="de-DE",
+            timezone_id="Europe/Berlin",
+            viewport={"width": 1920, "height": 1080},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+        )
+
+        # Inject stealth JS before every page navigation
+        context.add_init_script(STEALTH_JS)
+
+        page = context.new_page()
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
         try:
+            print("Navigating to page...")
             page.goto(URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Give JS time to render
-            page.wait_for_timeout(5000)
+            # Wait for Cloudflare challenge to auto-resolve (it redirects after solving)
+            # Poll for up to 60 seconds checking if we've left the challenge page
+            for i in range(12):
+                page.wait_for_timeout(5000)
+                title = page.title()
+                print(f"  [{(i+1)*5}s] Page title: {title}")
 
-            # Dismiss cookie consent if present
+                if "just a moment" not in title.lower():
+                    print("Cloudflare challenge passed!")
+                    break
+            else:
+                page.screenshot(path=str(DEBUG_DIR / "page_cf_stuck.png"), full_page=True)
+                (DEBUG_DIR / "page.html").write_text(page.content(), encoding="utf-8")
+                browser.close()
+                raise RuntimeError("Cloudflare challenge did not resolve within 60s")
+
+            # Now on the real page — wait for content to render
+            page.wait_for_timeout(3000)
+
+            # Handle cookie consent
             try:
                 accept_btn = page.locator("text=ICH AKZEPTIERE").first
                 accept_btn.click(timeout=5000)
                 print("Cookie consent dismissed.")
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(2000)
             except Exception:
-                print("No cookie consent dialog found (or already dismissed).")
+                print("No cookie consent dialog (or already dismissed).")
 
-            # Wait for tariff section
-            page.wait_for_selector("text=Standard Tarif", timeout=30000)
-
+            # Save debug artifacts
+            page.screenshot(path=str(DEBUG_DIR / "page_final.png"), full_page=True)
             html = page.content()
+            (DEBUG_DIR / "page.html").write_text(html, encoding="utf-8")
+
+            if "Tarif" not in html:
+                print("WARNING: 'Tarif' not found in page HTML", file=sys.stderr)
+                browser.close()
+                raise RuntimeError("Price data not found on page")
+
         except Exception:
-            # Save debug artifacts on any failure
             DEBUG_DIR.mkdir(parents=True, exist_ok=True)
             try:
-                page.screenshot(path=str(DEBUG_DIR / "page.png"), full_page=True)
+                page.screenshot(path=str(DEBUG_DIR / "page_error.png"), full_page=True)
                 (DEBUG_DIR / "page.html").write_text(page.content(), encoding="utf-8")
-                print("DEBUG: saved screenshot and HTML to debug/", file=sys.stderr)
             except Exception:
                 print("DEBUG: could not save debug artifacts", file=sys.stderr)
             browser.close()
