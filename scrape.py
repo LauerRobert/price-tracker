@@ -14,6 +14,7 @@ URL = (
 )
 
 CSV_PATH = Path(__file__).parent / "data" / "prices.csv"
+DEBUG_DIR = Path(__file__).parent / "debug"
 
 
 def fetch_page() -> str:
@@ -21,9 +22,29 @@ def fetch_page() -> str:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-        # Wait for the tariff section to be rendered
-        page.wait_for_selector("text=Standard Tarif", timeout=30000)
+        page.goto(URL, wait_until="networkidle", timeout=60000)
+
+        # Dismiss cookie consent if present
+        try:
+            accept_btn = page.locator("text=ICH AKZEPTIERE").first
+            accept_btn.click(timeout=5000)
+            print("Cookie consent dismissed.")
+            page.wait_for_timeout(2000)
+        except Exception:
+            print("No cookie consent dialog found (or already dismissed).")
+
+        # Wait for tariff section
+        try:
+            page.wait_for_selector("text=Standard Tarif", timeout=30000)
+        except Exception:
+            # Save debug artifacts on failure
+            DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(DEBUG_DIR / "page.png"), full_page=True)
+            (DEBUG_DIR / "page.html").write_text(page.content(), encoding="utf-8")
+            print("DEBUG: saved screenshot and HTML to debug/", file=sys.stderr)
+            browser.close()
+            raise
+
         html = page.content()
         browser.close()
     return html
