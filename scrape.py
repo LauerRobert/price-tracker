@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 
 URL = (
     "https://www.corsica-ferries.de/resa/leistungen/"
@@ -19,6 +18,60 @@ DEBUG_DIR = Path(__file__).parent / "debug"
 
 # Cloudflare challenge page titles (both languages)
 CF_CHALLENGE_TITLES = {"just a moment", "nur einen moment"}
+# Comprehensive stealth JS — patches all major automation fingerprints
+STEALTH_JS = """
+// 1. Hide navigator.webdriver
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+delete navigator.__proto__.webdriver;
+
+// 2. Fake chrome runtime
+window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+
+// 3. Fake plugins (real browsers have at least a few)
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const plugins = [0,1,2,3,4].map(i => ({
+            name: ['Chrome PDF Plugin','Chrome PDF Viewer','Native Client',
+                   'Chromium PDF Plugin','Chromium PDF Viewer'][i],
+            filename: ['internal-pdf-viewer','mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                       'internal-nacl-plugin','internal-pdf-viewer','mhjfbmdgcfjbbpaeojofohoefgiehjai'][i],
+            description: 'Portable Document Format',
+            length: 1,
+        }));
+        plugins.length = 5;
+        return plugins;
+    },
+});
+
+// 4. Fake languages
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['de-DE', 'de', 'en-US', 'en'],
+});
+
+// 5. Fake permissions query
+const origQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (params) =>
+    params.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : origQuery(params);
+
+// 6. Fake connection rtt (headless shows 0)
+Object.defineProperty(navigator, 'connection', {
+    get: () => ({ rtt: 50, downlink: 10, effectiveType: '4g', saveData: false }),
+});
+
+// 7. Fake deviceMemory (headless may omit)
+Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+
+// 8. Fake hardwareConcurrency
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+
+// 9. Fix broken iframe contentWindow
+const origAttachShadow = Element.prototype.attachShadow;
+Element.prototype.attachShadow = function() {
+    return origAttachShadow.apply(this, arguments);
+};
+"""
 
 
 def _is_challenge_page(title: str) -> bool:
@@ -49,9 +102,10 @@ def fetch_page() -> str:
             ),
         )
 
+        # Inject stealth JS before any page scripts run
+        context.add_init_script(STEALTH_JS)
+
         page = context.new_page()
-        # Apply playwright-stealth patches (webdriver, plugins, webgl, etc.)
-        stealth_sync(page)
 
         DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
