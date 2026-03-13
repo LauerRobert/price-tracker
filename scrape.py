@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 
 URL = (
     "https://www.corsica-ferries.de/resa/leistungen/"
@@ -16,33 +17,14 @@ URL = (
 CSV_PATH = Path(__file__).parent / "data" / "prices.csv"
 DEBUG_DIR = Path(__file__).parent / "debug"
 
-# JS to remove headless/automation fingerprints before any page scripts run
-STEALTH_JS = """
-// Remove webdriver flag
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+# Cloudflare challenge page titles (both languages)
+CF_CHALLENGE_TITLES = {"just a moment", "nur einen moment"}
 
-// Fake plugins
-Object.defineProperty(navigator, 'plugins', {
-    get: () => [1, 2, 3, 4, 5],
-});
 
-// Fake languages
-Object.defineProperty(navigator, 'languages', {
-    get: () => ['de-DE', 'de', 'en-US', 'en'],
-});
-
-// Remove Chrome automation indicators
-if (window.chrome === undefined) {
-    window.chrome = { runtime: {} };
-}
-
-// Fake permissions query
-const originalQuery = window.navigator.permissions.query;
-window.navigator.permissions.query = (parameters) =>
-    parameters.name === 'notifications'
-        ? Promise.resolve({ state: Notification.permission })
-        : originalQuery(parameters);
-"""
+def _is_challenge_page(title: str) -> bool:
+    """Return True if the page title indicates a Cloudflare challenge."""
+    t = title.lower().rstrip("….\u2026 ")
+    return any(t.startswith(cf) for cf in CF_CHALLENGE_TITLES)
 
 
 def fetch_page() -> str:
@@ -53,6 +35,7 @@ def fetch_page() -> str:
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
+                "--disable-dev-shm-usage",
             ],
         )
         context = browser.new_context(
@@ -66,31 +49,31 @@ def fetch_page() -> str:
             ),
         )
 
-        # Inject stealth JS before every page navigation
-        context.add_init_script(STEALTH_JS)
-
         page = context.new_page()
+        # Apply playwright-stealth patches (webdriver, plugins, webgl, etc.)
+        stealth_sync(page)
+
         DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
         try:
             print("Navigating to page...")
             page.goto(URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Wait for Cloudflare challenge to auto-resolve (it redirects after solving)
-            # Poll for up to 60 seconds checking if we've left the challenge page
-            for i in range(12):
+            # Wait for Cloudflare challenge to auto-resolve
+            # Poll for up to 90 seconds checking if we've left the challenge page
+            for i in range(18):
                 page.wait_for_timeout(5000)
                 title = page.title()
                 print(f"  [{(i+1)*5}s] Page title: {title}")
 
-                if "just a moment" not in title.lower():
+                if not _is_challenge_page(title):
                     print("Cloudflare challenge passed!")
                     break
             else:
                 page.screenshot(path=str(DEBUG_DIR / "page_cf_stuck.png"), full_page=True)
                 (DEBUG_DIR / "page.html").write_text(page.content(), encoding="utf-8")
                 browser.close()
-                raise RuntimeError("Cloudflare challenge did not resolve within 60s")
+                raise RuntimeError("Cloudflare challenge did not resolve within 90s")
 
             # Now on the real page — wait for content to render
             page.wait_for_timeout(3000)
