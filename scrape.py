@@ -1,4 +1,4 @@
-"""Scrape Corsica Ferries prices and append to CSV."""
+"""Scrape Corsica Ferries prices using Playwright and append to CSV."""
 
 import csv
 import re
@@ -6,7 +6,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
+from playwright.sync_api import sync_playwright
 
 URL = (
     "https://www.corsica-ferries.de/resa/leistungen/"
@@ -15,29 +15,25 @@ URL = (
 
 CSV_PATH = Path(__file__).parent / "data" / "prices.csv"
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-}
-
 
 def fetch_page() -> str:
-    """Fetch the booking page HTML."""
-    resp = requests.get(URL, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-    return resp.text
+    """Fetch the booking page HTML using a headless browser."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+        # Wait for the tariff section to be rendered
+        page.wait_for_selector("text=Standard Tarif", timeout=30000)
+        html = page.content()
+        browser.close()
+    return html
 
 
 def parse_prices(html: str) -> dict:
     """Extract tariff prices and total from the HTML."""
     prices = {}
 
-    # Standard / Flex tariffs — pattern: "Standard Tarif376,00 €" or "Flexibler Tarif425,00 €"
-    # The page has two occurrences of each: first for Hinreise, second for Rückreise.
+    # Standard / Flex tariffs — two occurrences each: Hinreise then Rückreise
     standard_matches = re.findall(r"Standard\s+Tarif\s*([\d.,]+)\s*€", html)
     flex_matches = re.findall(r"Flexibler\s+Tarif\s*([\d.,]+)\s*€", html)
 
@@ -48,7 +44,7 @@ def parse_prices(html: str) -> dict:
         prices["outbound_flex"] = flex_matches[0].replace(".", "").replace(",", ".")
         prices["return_flex"] = flex_matches[1].replace(".", "").replace(",", ".")
 
-    # Total reservation price — pattern: "Ihre Reservierung899,00 €"
+    # Total reservation price
     total_match = re.search(r"Ihre\s+Reservierung\s*([\d.,]+)\s*€", html)
     if total_match:
         prices["total"] = total_match.group(1).replace(".", "").replace(",", ".")
@@ -92,7 +88,7 @@ def main() -> int:
 
     print(f"Recorded at {datetime.now(timezone.utc).isoformat(timespec='seconds')}:")
     for key, val in prices.items():
-        print(f"  {key}: {val} €")
+        print(f"  {key}: {val} EUR")
 
     return 0
 
