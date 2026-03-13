@@ -1,0 +1,37 @@
+name: Track Prices
+
+on:
+  schedule:
+    # Phase 1 (week 1): every 2 hours
+    - cron: "0 */2 * * *"
+    # Phase 2: comment out the line above and uncomment below for twice daily
+    # - cron: "0 8,20 * * *"
+  workflow_dispatch: # allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Scrape prices
+        run: python scrape.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/prices.csv
+          # Only commit if there are changes
+          git diff --cached --quiet || git commit -m "price update $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
