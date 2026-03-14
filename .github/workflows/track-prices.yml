@@ -3,7 +3,7 @@ name: Track Prices
 on:
     schedule:
         # Phase 1 (week 1): every 2 hours
-        - cron: '0 */2 * * *'
+        # - cron: '0 */2 * * *'
         # Phase 2: comment out the line above and uncomment below for twice daily
         # - cron: "0 8,20 * * *"
     workflow_dispatch: # allow manual trigger
